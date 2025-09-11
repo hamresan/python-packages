@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ham-dicom"
+version = "0.1.0"
+description = "Lightweight SQLAlchemy query-builder and model wrapper"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [{ name = "Mehran Pourshahmir" }]
+dependencies = [
+    "sqlalchemy>=2.0.43"
+]
+
+[project.urls]
+Homepage = "https://hamresan.com/"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["ham_orm*"]

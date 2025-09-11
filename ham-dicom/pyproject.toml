@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ham-dicom"
+version = "0.1.0"
+description = "Lightweight DICOM convenience wrapper around pydicom"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+authors = [{ name = "You" }]
+dependencies = [
+    "pydicom>=2.3"
+]
+
+[project.urls]
+Homepage = "https://hamresan.com/"
+
+[tool.setuptools]
+package-dir = {}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["linkh_dicom*"]
