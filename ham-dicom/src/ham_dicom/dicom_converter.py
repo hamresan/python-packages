@@ -86,11 +86,11 @@ class DicomConverter:
         from pydicom.uid import ExplicitVRLittleEndian
         from pydicom.dataset import Dataset
 
-        if not self.hasattr("file_meta") or not hasattr(self.file_meta, "TransferSyntaxUID"):
-                self.file_meta = Dataset()
-                self.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
-                self.file_meta.MediaStorageSOPClassUID = self.SOPClassUID
-                self.file_meta.MediaStorageSOPInstanceUID = self.SOPInstanceUID
+        if not hasattr(self.dataset, "file_meta") or not hasattr(self.dataset.file_meta, "TransferSyntaxUID"):
+            self.dataset.file_meta = Dataset()
+            self.dataset.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+            self.dataset.file_meta.MediaStorageSOPClassUID = self.dataset.SOPClassUID
+            self.dataset.file_meta.MediaStorageSOPInstanceUID = self.dataset.SOPInstanceUID
 
     # -------- Institution --------
     @property
@@ -130,12 +130,12 @@ class DicomConverter:
     def Patient(self):
         class PatientInfo:
             def __init__(self, ds):
-                self.Name = ds.PatientName
-                self.ID = ds.PatientID
-                self.BirthDate = ds.PatientBirthDate
-                self.Sex = ds.PatientSex
-                self.Age = ds.PatientAge
-                self.Comments = ds.PatientComments
+                self.Name = getattr(ds, 'PatientName', None)
+                self.ID = getattr(ds, 'PatientID', None)
+                self.BirthDate = getattr(ds, 'PatientBirthDate', None)
+                self.Sex = getattr(ds, 'PatientSex', None)
+                self.Age = getattr(ds, 'PatientAge', None)
+                self.Comments = getattr(ds, 'PatientComments', None)
  
             def to_dict(self):
                 return {
@@ -153,12 +153,12 @@ class DicomConverter:
     def Study(self):
         class StudyInfo:
             def __init__(self, ds):
-                self.InstanceUID = ds.StudyInstanceUID
-                self.StudyID = ds.StudyID
-                self.Date = ds.StudyDate
-                self.Time = ds.StudyTime
-                self.Description = ds.StudyDescription
-                self.AccessionNumber = ds.AccessionNumber
+                self.InstanceUID = getattr(ds, 'StudyInstanceUID', None)
+                self.StudyID = getattr(ds, 'StudyID', None)
+                self.Date = getattr(ds, 'StudyDate', None)
+                self.Time = getattr(ds, 'StudyTime', None)
+                self.Description = getattr(ds, 'StudyDescription', None)
+                self.AccessionNumber = getattr(ds, 'AccessionNumber', None)
 
             def to_dict(self):
                 return {
@@ -176,14 +176,14 @@ class DicomConverter:
     def Series(self):
         class SeriesInfo:
             def __init__(self, ds):
-                self.InstanceUID = ds.SeriesInstanceUID
-                self.SeriesNumber = ds.SeriesNumber
-                self.Description = ds.SeriesDescription
-                self.Modality = ds.Modality
-                self.BodyPartExamined = ds.BodyPartExamined
-                self.Laterality = ds.Laterality
-                self.ImageLaterality = ds.ImageLaterality
-                self.ProtocolName = ds.ProtocolName
+                self.InstanceUID = getattr(ds, 'SeriesInstanceUID', None)
+                self.SeriesNumber = getattr(ds, 'SeriesNumber', None)
+                self.Description = getattr(ds, 'SeriesDescription', None)
+                self.Modality = getattr(ds, 'Modality', None)
+                self.BodyPartExamined = getattr(ds, 'BodyPartExamined', None)
+                self.Laterality = getattr(ds, 'Laterality', None)
+                self.ImageLaterality = getattr(ds, 'ImageLaterality', None)
+                self.ProtocolName = getattr(ds, 'ProtocolName', None)
 
             def to_dict(self):
                 return {
@@ -203,16 +203,16 @@ class DicomConverter:
     def Equipment(self):
         class EquipmentInfo:
             def __init__(self, ds):
-                self.Manufacturer = ds.Manufacturer
-                self.ManufacturerModelName = ds.ManufacturerModelName
-                self.DeviceSerialNumber = ds.DeviceSerialNumber
-                self.SoftwareVersions = ds.SoftwareVersions
-                self.DetectorType = ds.DetectorType
-                self.Grid = ds.Grid
-                self.DistanceSourceToDetector = ds.DistanceSourceToDetector
-                self.KVP = ds.KVP
-                self.XRayTubeCurrent = ds.XRayTubeCurrent
-                self.Exposure = ds.Exposure
+                self.Manufacturer = getattr(ds, 'Manufacturer', None)
+                self.ManufacturerModelName = getattr(ds, 'ManufacturerModelName', None)
+                self.DeviceSerialNumber = getattr(ds, 'DeviceSerialNumber', None)
+                self.SoftwareVersions = getattr(ds, 'SoftwareVersions', None)
+                self.DetectorType = getattr(ds, 'DetectorType', None)
+                self.Grid = getattr(ds, 'Grid', None)
+                self.DistanceSourceToDetector = getattr(ds, 'DistanceSourceToDetector', None)
+                self.KVP = getattr(ds, 'KVP', None)
+                self.XRayTubeCurrent = getattr(ds, 'XRayTubeCurrent', None)
+                self.Exposure = getattr(ds, 'Exposure', None)
 
             def to_dict(self):
                 return {
@@ -234,22 +234,22 @@ class DicomConverter:
     def Image(self):
         class ImageInfo:
             def __init__(self, ds):
-                self.SOPClassUID = ds.SOPClassUID
-                self.SOPInstanceUID = ds.SOPInstanceUID
-                self.Rows = ds.Rows
-                self.Columns = ds.Columns
-                self.BitsAllocated = ds.BitsAllocated
-                self.BitsStored = ds.BitsStored
-                self.HighBit = ds.HighBit
-                self.PixelRepresentation = ds.PixelRepresentation
-                self.PhotometricInterpretation = ds.PhotometricInterpretation
-                self.PixelSpacing = ds.PixelSpacing
-                self.ImagerPixelSpacing = ds.ImagerPixelSpacing
-                self.WindowCenter = ds.WindowCenter
-                self.WindowWidth = ds.WindowWidth
-                self.RescaleIntercept = ds.RescaleIntercept
-                self.RescaleSlope = ds.RescaleSlope
-                self.LossyImageCompression = ds.LossyImageCompression
+                self.SOPClassUID = getattr(ds, 'SOPClassUID', None)
+                self.SOPInstanceUID = getattr(ds, 'SOPInstanceUID', None)
+                self.Rows = getattr(ds, 'Rows', None)
+                self.Columns = getattr(ds, 'Columns', None)
+                self.BitsAllocated = getattr(ds, 'BitsAllocated', None)
+                self.BitsStored = getattr(ds, 'BitsStored', None)
+                self.HighBit = getattr(ds, 'HighBit', None)
+                self.PixelRepresentation = getattr(ds, 'PixelRepresentation', None)
+                self.PhotometricInterpretation = getattr(ds, 'PhotometricInterpretation', None)
+                self.PixelSpacing = getattr(ds, 'PixelSpacing', None)
+                self.ImagerPixelSpacing = getattr(ds, 'ImagerPixelSpacing', None)
+                self.WindowCenter = getattr(ds, 'WindowCenter', None)
+                self.WindowWidth = getattr(ds, 'WindowWidth', None)
+                self.RescaleIntercept = getattr(ds, 'RescaleIntercept', None)
+                self.RescaleSlope = getattr(ds, 'RescaleSlope', None)
+                self.LossyImageCompression = getattr(ds, 'LossyImageCompression', None)
 
             def to_dict(self):
                 return {
@@ -330,17 +330,23 @@ class DicomConverter:
     @property 
     def Year(self):    
         date = self.attr('StudyDate')
+        if not date or len(date) < 4:
+            return None        
         return date[:4]
-    @property 
-    
+        
+    @property
     def Month(self):    
         date = self.attr('StudyDate')
+        if not date or len(date) < 6:
+            return None
         return date[4:6]
     
     @property 
     def Day(self):    
         date = self.attr('StudyDate')
-        return date[4:6]        
+        if not date or len(date) < 8:
+            return None
+        return date[6:8]        
 
     def asdict(self, include_dataset: bool = True, include_wrapper: bool = True) -> dict:
         """

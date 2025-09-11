@@ -22,4 +22,8 @@ package-dir = {}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["linkh_dicom*"]
+include = ["ham_dicom*"]
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true

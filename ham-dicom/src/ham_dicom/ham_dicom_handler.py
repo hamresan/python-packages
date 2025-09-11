@@ -96,7 +96,7 @@ class Dicom:
                         defer_size=defer_size,
                     )
 
-            if not 'SOPInstanceUID' in dataset:
+            if not 'SOPInstanceUID' in ds:
                 raise ValueError("File is not a valid DICOM dataset")
         
         object.__setattr__(self, "dataset", ds)
@@ -382,7 +382,7 @@ class Dicom:
     @property 
     def Day(self):    
         date = self.attr('StudyDate')
-        return date[4:6]        
+        return date[6:8]        
 
     def asdict(self, include_dataset: bool = True, include_wrapper: bool = True) -> dict:
         """
