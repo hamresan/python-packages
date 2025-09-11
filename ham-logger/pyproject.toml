@@ -10,18 +10,34 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-  { name = "Your Name" }
+  { name = "HAM Development Team" }
 ]
-keywords = ["logging", "logger", "python-logging"]
+keywords = ["logging", "logger", "python-logging", "daily-logs", "file-logging"]
 classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9", 
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
   "License :: OSI Approved :: MIT License",
-  "Operating System :: OS Independent"
+  "Operating System :: OS Independent",
+  "Topic :: System :: Logging",
+  "Topic :: Software Development :: Libraries :: Python Modules"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=6.0",
+  "pytest-cov>=2.0",
 ]
 
 [project.urls]
-Homepage = "https://example.com/ham-logger"
-Repository = "https://example.com/ham-logger.git"
+Homepage = "https://github.com/ham-team/ham-logger"
+Repository = "https://github.com/ham-team/ham-logger.git"
+Issues = "https://github.com/ham-team/ham-logger/issues"
 
 [tool.setuptools]
 package-dir = {}
@@ -30,3 +46,26 @@ package-dir = {}
 where = ["src"]
 include = ["ham_logger*"]
 exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-v"
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError"
+]
