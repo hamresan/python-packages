@@ -44,12 +44,39 @@ class dualmethod:
 class AppBaseModel(ABC):
     """
     Thin wrapper that adds convenient CRUD helpers on top of a SQLAlchemy model.
+    
+    This base class provides a high-level interface for common database operations
+    while maintaining the flexibility of SQLAlchemy's ORM.
+    
     Subclasses should set `_model` (SQLAlchemy mapped class) and initialize the
     DB session once via `init_db(session)`.
+
+    Attributes:
+        _model: SQLAlchemy mapped class (must be set in subclass)
+        _db: Database session (initialized via init_db())
+        _primary_key: Primary key field name (default: "id")
+        _is_allow_insert_manual_id: Allow manual ID setting during insert (default: False)
+        _whitelist_fields: List of fields allowed for mass assignment (default: [])
+        _guard_fields: List of fields protected from mass assignment (default: [])
 
     Example:
         class UserModel(AppBaseModel):
             _model = User  # SQLAlchemy mapped class
+            
+        # Initialize database session
+        UserModel.init_db(session)
+        
+        # Create new user
+        user = UserModel.insert({"name": "John", "email": "john@example.com"})
+        
+        # Find user by ID
+        user = UserModel.find(1)
+        
+        # Update user
+        user = UserModel.update({"id": 1, "name": "Jane"})
+        
+        # Find all users with filters
+        users = UserModel.all(filters={"active": True}, limit=10)
     """
 
     _model: Type[Any] = None
@@ -115,6 +142,8 @@ class AppBaseModel(ABC):
 
     @classmethod
     def find(cls, pk: Any, fields: Iterable[Union[str, Any]] = (), include: Iterable[Union[str, Any]] = ()):
+        if pk is None:
+            return None
         return cls.first(fields=fields, filters={f"{cls._model.__name__}.{cls._primary_key}": pk}, include=include)
 
     @classmethod
@@ -132,6 +161,8 @@ class AppBaseModel(ABC):
 
     @classmethod
     def exist(cls, field: str, value: Any, exclude_value: Any = None) -> bool:
+        if value is None:
+            return False
         filters = {field: value}
         if exclude_value is not None:
             filters[f"{cls._primary_key}__ne"] = exclude_value
@@ -250,10 +281,10 @@ class AppBaseModel(ABC):
         object.__setattr__(self, name, value)
 
     def __delattr__(self, name):
-        if name.startswith("_") or name in type(self).__dict__:
+        if name.startswith("_") or name in type(self).__dict__ or hasattr(type(self), name):
             object.__delattr__(self, name)
             return
-        if hasattr(self._entity, name):
+        if "_entity" in self.__dict__ and hasattr(self._entity, name):
             delattr(self._entity, name)
             return
         raise AttributeError(f"{type(self).__name__} has no attribute {name!r}")

@@ -5,7 +5,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type, U
 from sqlalchemy.orm import Session, load_only, selectinload, joinedload
 from sqlalchemy.orm.attributes import InstrumentedAttribute
 from sqlalchemy.sql import ColumnElement
-from sqlalchemy import func, asc, desc
+from sqlalchemy import func, asc, desc, select
+from sqlalchemy.orm import Query
 
 LoaderOpt = Any
 FilterDict = Dict[str, Any]
@@ -26,10 +27,10 @@ class QueryBuilder:
     """
 
     def __init__(self, db: Session, model: Type[Any]):
-        if not hasattr(db, "query"):
-            raise TypeError("db must be a sync SQLAlchemy Session (has .query)")
+        # Support both legacy and modern SQLAlchemy sessions
         self.db: Session = db
         self.model: Type[Any] = model
+        self._use_legacy_query = hasattr(db, "query")  # Check if legacy query API is available
 
         self._joins: List[Tuple[InstrumentedAttribute, bool]] = []   # (attr, isouter)
         self._includes: List[LoaderOpt] = []                         # loader options
@@ -121,23 +122,42 @@ class QueryBuilder:
     # ---------- builders / runners ----------
     def build(self):
         """
-        Return a SQLAlchemy Query (legacy ORM style).
+        Return a SQLAlchemy Query or Result, supporting both legacy and modern APIs.
         """
-        q = self.db.query(self.model)
+        if self._use_legacy_query:
+            # Legacy SQLAlchemy 1.x style
+            q = self.db.query(self.model)
+        else:
+            # Modern SQLAlchemy 2.0+ style
+            q = select(self.model)
 
         # joins
-        for attr, isouter in self._joins:
-            q = q.join(attr, isouter=isouter)
+        if self._use_legacy_query:
+            for attr, isouter in self._joins:
+                q = q.join(attr, isouter=isouter)
+        else:
+            for attr, isouter in self._joins:
+                q = q.join(attr, isouter=isouter)
 
         # loader options
         if self._includes:
-            q = q.options(*self._includes)
+            if self._use_legacy_query:
+                q = q.options(*self._includes)
+            else:
+                q = q.options(*self._includes)
+        
         if self._only_cols:
-            q = q.options(load_only(*self._only_cols))
+            if self._use_legacy_query:
+                q = q.options(load_only(*self._only_cols))
+            else:
+                q = q.options(load_only(*self._only_cols))
 
         # filters
         if self._filters:
-            q = q.filter(*self._filters)
+            if self._use_legacy_query:
+                q = q.filter(*self._filters)
+            else:
+                q = q.where(*self._filters)
 
         # order / limit / offset
         if self._order_by:
@@ -149,21 +169,37 @@ class QueryBuilder:
 
         return q
     
-    def build_query(self, fields:Union[str, InstrumentedAttribute] = [], filters = {}, orders = [], includes = [], offset = None, limit = None):
+    def build_query(self, fields: List[Union[str, InstrumentedAttribute]] = None, 
+                    filters: FilterDict = None, orders: List[Union[str, ColumnElement[Any]]] = None, 
+                    includes: List[Union[str, LoaderOpt]] = None, 
+                    offset: Optional[int] = None, limit: Optional[int] = None):
+        """
+        Convenience method to build a query with all parameters at once.
+        
+        Args:
+            fields: List of field names or attributes to select (for load_only)
+            filters: Dictionary of filter conditions
+            orders: List of order by clauses
+            includes: List of relationships to eager load
+            offset: Query offset
+            limit: Query limit
+            
+        Returns:
+            Self for method chaining
+        """
         q = self
 
-        if len(fields) > 0:
-            q = self.only(*fields)     
+        if fields:
+            q = q.only(*fields)     
                
         if filters:
             q = q.where(filters)
 
-        if len(orders) > 0:
+        if orders:
             for order in orders:
                 q = q.order_by(order)
-
         
-        if len(includes) > 0:
+        if includes:
             for include in includes:
                 q = q.include(include)
 
@@ -173,16 +209,31 @@ class QueryBuilder:
         if limit is not None:
             q = q.limit(limit)
 
-        return q
+        return q.build()
 
     def first(self):
-        return self.build().first()
+        q = self.build()
+        if self._use_legacy_query:
+            return q.first()
+        else:
+            # Modern SQLAlchemy 2.0+ style
+            return self.db.execute(q).scalar_one_or_none()
 
     def one_or_none(self):
-        return self.build().one_or_none()
+        q = self.build()
+        if self._use_legacy_query:
+            return q.one_or_none()
+        else:
+            # Modern SQLAlchemy 2.0+ style  
+            return self.db.execute(q).scalar_one_or_none()
 
     def all(self):
-        return self.build().all()
+        q = self.build()
+        if self._use_legacy_query:
+            return q.all()
+        else:
+            # Modern SQLAlchemy 2.0+ style
+            return self.db.execute(q).scalars().all()
 
     def exists(self) -> bool:
         return self.first() is not None
