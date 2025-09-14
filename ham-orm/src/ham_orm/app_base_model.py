@@ -3,13 +3,14 @@ from __future__ import annotations
 import copy
 from abc import ABC
 from functools import wraps
-from typing import Any, Mapping, Optional, Type, Union, Iterable, List
+from typing import Any, Mapping, Optional, Type, Union, Iterable, List, Dict
 
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
 from .query_builder import QueryBuilder
 
+from .serializer import Serializer
 
 class dualmethod:
     """
@@ -112,6 +113,10 @@ class AppBaseModel(ABC):
     def guard_fields(self) -> List[str]:
         return list(set(self._guard_fields + ["created_at", "creator", "updated_at", "updator"]))
 
+    @property
+    def model(self) -> str:
+        return self._model
+
     # ----- model / table names -----
     @property
     def modelname(self) -> str:
@@ -145,11 +150,17 @@ class AppBaseModel(ABC):
         if pk is None:
             return None
         return cls.first(fields=fields, filters={f"{cls._model.__name__}.{cls._primary_key}": pk}, include=include)
+    
+    @classmethod
+    def find(cls, pk: Any, fields: Iterable[Union[str, Any]] = (), include: Iterable[Union[str, Any]] = ()):
+        if pk is None:
+            return None
+        return cls.first(fields=fields, filters={f"{cls._model.__name__}.{cls._primary_key}": pk}, include=include)    
 
     @classmethod
     def all(cls, fields: Iterable[Union[str, Any]] = (), filters: Mapping[str, Any] = None,
             orders: Iterable[Union[str, Any]] = (), include: Iterable[Union[str, Any]] = (),
-            offset: Optional[int] = None, limit: Optional[int] = None):
+            offset: Optional[int] = None, limit: Optional[int] = None, serialize: bool = False) -> List[Union["AppBaseModel", Dict[str, Any]]]:
         cls._ensure_ready()
         qb = QueryBuilder(cls._db, cls._model).build_query(fields=list(fields or []),
                                                            filters=dict(filters or {}),
@@ -157,7 +168,8 @@ class AppBaseModel(ABC):
                                                            includes=list(include or []),
                                                            offset=offset, limit=limit)
         entities = qb.all()
-        return [cls(e) for e in entities] if entities else []
+        
+        return ( Serializer.serialize_many(entities, fields=fields, includes=[] ) if serialize else [cls(e) for e in entities] ) if entities else []
 
     @classmethod
     def exist(cls, field: str, value: Any, exclude_value: Any = None) -> bool:
@@ -168,6 +180,14 @@ class AppBaseModel(ABC):
             filters[f"{cls._primary_key}__ne"] = exclude_value
         obj = cls.first(fields=(cls._primary_key,), filters=filters)
         return obj is not None
+
+    @classmethod
+    def count(cls, filters: Mapping[str, Any] = None) -> int:
+        cls._ensure_ready()
+        qb = QueryBuilder(cls._db, cls._model)
+        if filters:
+            qb = qb.where(dict(filters))
+        return qb.count()
 
     # ----- persistence hooks -----
     def before_save(self, data: dict) -> dict:

@@ -1,6 +1,9 @@
 # query_builder.py
 from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type, Union
+import re
+
+from attr import field
 
 from sqlalchemy.orm import Session, load_only, selectinload, joinedload
 from sqlalchemy.orm.attributes import InstrumentedAttribute
@@ -11,6 +14,7 @@ from sqlalchemy.orm import Query
 LoaderOpt = Any
 FilterDict = Dict[str, Any]
 
+_ALIAS_RE = re.compile(r"\s+as\s+", flags=re.IGNORECASE)
 
 class QueryBuilder:
     """
@@ -32,7 +36,7 @@ class QueryBuilder:
         self.model: Type[Any] = model
         self._use_legacy_query = hasattr(db, "query")  # Check if legacy query API is available
 
-        self._joins: List[Tuple[InstrumentedAttribute, bool]] = []   # (attr, isouter)
+        self._joins: list[tuple[InstrumentedAttribute, bool]] = []   # (attr, isouter)
         self._includes: List[LoaderOpt] = []                         # loader options
         self._only_cols: List[InstrumentedAttribute] = []            # for load_only
         self._filters: List[ColumnElement[bool]] = []                # where clauses
@@ -58,16 +62,34 @@ class QueryBuilder:
 
     def only(self, *cols: Union[str, InstrumentedAttribute]) -> "QueryBuilder":
         """
-        Load only specific columns on the root model (projection).
+        Load only specific columns on the root model.
+        Accepts:
+        - "field" or InstrumentedAttribute (root columns)
+        - "rel.field" to apply load_only on a relationship
+        - Aliases like "field as Alias" (alias ignored at ORM-option time)
         """
         for c in cols:
-            if isinstance(c, str):
-                attr = self._resolve_attr(self.model, c)
-                self._only_cols.append(attr)
-            else:
+            if not isinstance(c, str):
                 self._only_cols.append(c)
-        return self
+                continue
 
+            base, _alias = self._split_alias(c)
+
+            if "." in base:
+                # relationship path like "patient.id"
+                rel_path, leaf = base.rsplit(".", 1)
+                rel_attr = self._resolve_attr_path(self.model, rel_path)  # Study.patient
+                prop = getattr(rel_attr, "property", None)
+                if not prop or not hasattr(prop, "mapper"):
+                    raise ValueError(f"'{rel_path}' is not a relationship path on {self.model.__name__}")
+                target_cls = prop.mapper.class_
+                leaf_attr = self._resolve_attr(target_cls, leaf)  # Patient.id
+                self._includes.append(selectinload(rel_attr).load_only(leaf_attr))
+            else:
+                attr = self._resolve_attr(self.model, base)  # Study.study_date
+                self._only_cols.append(attr)
+        return self
+    
     def where(self, filters: Optional[FilterDict] = None,
               *expressions: ColumnElement[bool]) -> "QueryBuilder":
         """
@@ -98,17 +120,50 @@ class QueryBuilder:
     def order_by(self, *items: Union[str, ColumnElement[Any]]) -> "QueryBuilder":
         """
         Order by columns. Strings can be:
-          - "field" for ASC
-          - "-field" for DESC
+        - "field" for ASC
+        - "-field" for DESC
+        - supports dotted paths like "patient.patient_name" and "series.modality"
+            * if the path is a collection relationship (uselist=True), we aggregate:
+            ASC -> MIN(leaf), DESC -> MAX(leaf) and GROUP BY the root PK
         """
         for it in items:
-            if isinstance(it, str):
-                direction = desc if it.startswith("-") else asc
-                name = it[1:] if it.startswith("-") else it
+            if not isinstance(it, str):
+                self._order_by.append(it)
+                continue
+
+            direction = desc if it.startswith("-") else asc
+            name = it[1:] if it.startswith("-") else it
+
+            if "." not in name:
                 col = self._resolve_attr(self.model, name)
                 self._order_by.append(direction(col))
+                continue
+
+            # dotted path
+            rel_path, leaf = name.rsplit(".", 1)
+            rel_attr = self._resolve_attr_path(self.model, rel_path)
+            prop = getattr(rel_attr, "property", None)
+            if not prop or not hasattr(prop, "mapper"):
+                raise ValueError(f"'{rel_path}' is not a relationship path on {self.model.__name__}")
+
+            target_cls = prop.mapper.class_
+            leaf_col = self._resolve_attr(target_cls, leaf)
+
+            # ensure join (inner is fine; change to outer by passing isouter=True if you prefer)
+            if not self._has_join(rel_attr):
+                self._joins.append((rel_attr, False))
+
+            if getattr(prop, "uselist", False):
+                # collection -> aggregate and group by root PK
+                agg = func.max(leaf_col) if it.startswith("-") else func.min(leaf_col)
+                self._order_by.append(direction(agg))
+                pk = self._root_pk_col()
+                if pk not in self._group_by:
+                    self._group_by.append(pk)
             else:
-                self._order_by.append(it)
+                # scalar relation -> simple order by related leaf
+                self._order_by.append(direction(leaf_col))
+
         return self
 
     def limit(self, n: int) -> "QueryBuilder":
@@ -234,6 +289,21 @@ class QueryBuilder:
         else:
             # Modern SQLAlchemy 2.0+ style
             return self.db.execute(q).scalars().all()
+        
+    def count(self) -> int:
+        """
+        Return row count matching current filters/joins.
+        """
+        if self._use_legacy_query:
+            q = self.db.query(func.count()).select_from(self.model)
+            if self._filters:
+                q = q.filter(*self._filters)
+            return q.scalar()
+        else:
+            q = select(func.count()).select_from(self.model)
+            if self._filters:
+                q = q.where(*self._filters)
+            return self.db.execute(q).scalar_one()       
 
     def exists(self) -> bool:
         return self.first() is not None
@@ -255,15 +325,23 @@ class QueryBuilder:
         
 
     # ---------- helpers ----------
+    def _split_alias(self, s: str) -> tuple[str, Optional[str]]:
+        """
+        Split strings like 'field as Alias' (case-insensitive).
+        Returns (base, alias_or_None).
+        """
+        parts = [p.strip() for p in _ALIAS_RE.split(s)]
+        return (parts[0], parts[1]) if len(parts) == 2 else (s.strip(), None)
+    
     def _resolve_attr(self, model: Type[Any], name: str) -> InstrumentedAttribute:
-        if not hasattr(model, name):
-            raise ValueError(f"{model.__name__} has no attribute '{name}'")
-        return getattr(model, name)
+        # Strip alias and model prefix before hasattr/getattr
+        base, _alias = self._split_alias(name)
+        base = self._normalize_field(base)
+        if not hasattr(model, base):
+            raise ValueError(f"{model.__name__} has no attribute '{base}'")
+        return getattr(model, base)
 
     def _resolve_attr_path(self, model: Type[Any], path: Union[str, InstrumentedAttribute]) -> InstrumentedAttribute:
-        """
-        Resolve dotted paths like "patient.studies" relative to root model.
-        """
         if not isinstance(path, str):
             return path
         current = model
@@ -271,15 +349,13 @@ class QueryBuilder:
         attr: Optional[InstrumentedAttribute] = None
         for p in parts:
             attr = self._resolve_attr(current, p)
-            # walk the mapper to the related class if this is a relationship
-            rel = getattr(getattr(current, p), "property", None)
+            rel = getattr(attr, "property", None)
             if rel is not None and hasattr(rel, "mapper"):
                 current = rel.mapper.class_
-            else:
-                current = model  # stay on model for non-relation attrs
+            # else: keep current as-is (do NOT reset to model)
         assert attr is not None
         return attr
-    
+     
     def _normalize_field(self, field: str) -> str:
         prefix = f"{self.model.__name__}."
         return field[len(prefix):] if field.startswith(prefix) else field
@@ -303,7 +379,21 @@ class QueryBuilder:
 
             field = self._normalize_field(raw_field)
 
-            col = self._resolve_attr(self.model, field)
+            if "." in field:
+                rel_path, leaf = field.rsplit(".", 1)
+                rel_attr = self._resolve_attr_path(self.model, rel_path)  # Study.patient
+                prop = getattr(rel_attr, "property", None)
+                if not prop or not hasattr(prop, "mapper"):
+                    raise ValueError(f"'{rel_path}' is not a relationship path on {self.model.__name__}")
+                target_cls = prop.mapper.class_
+                col = self._resolve_attr(target_cls, leaf)  # Patient.patient_name
+
+                # ensure we join to filter on related leaf column
+                if not self._has_join(rel_attr):
+                    self._joins.append((rel_attr, False))
+            else:
+                # root-level column on Study
+                col = self._resolve_attr(self.model, field)
 
             # mapping
             if op == "eq":
@@ -343,3 +433,9 @@ class QueryBuilder:
             else:
                 raise ValueError(f"Unsupported operator '__{op}' for field '{field}'")
         return preds
+
+    def _has_join(self, rel_attr, isouter: bool | None = None) -> bool:
+        for a, outer in self._joins:
+            if a is rel_attr and (isouter is None or outer is isouter):
+                return True
+        return False
