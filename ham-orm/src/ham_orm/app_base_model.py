@@ -198,6 +198,10 @@ class AppBaseModel(ABC):
 
     def before_update(self, data: dict) -> dict:
         return data
+    
+    def before_delete(self) -> bool:
+        """Hook before deletion. Return False to cancel delete."""
+        return True
 
     def after_save(self, old: Optional["AppBaseModel"]) -> bool:
         return True
@@ -207,6 +211,11 @@ class AppBaseModel(ABC):
 
     def after_update(self, old: Optional["AppBaseModel"]) -> bool:
         return True
+    
+    def after_delete(self) -> bool:
+        """Hook after deletion. Return False to rollback delete."""
+        return True    
+
 
     # ----- persistence -----
     def populate(self, data: Mapping[str, Any]) -> None:
@@ -234,6 +243,44 @@ class AppBaseModel(ABC):
     def save(self, data: Optional[dict] = None) -> Optional["AppBaseModel"]:
         is_updating = getattr(self._entity, self._primary_key, None) is not None or (data and self._primary_key in data)
         return self._store(data or {}, is_updating=is_updating, is_saving=True)
+    
+    # ----- persistence -----
+    @dualmethod
+    def delete(self, pk: Any = None) -> bool:
+        """
+        Delete entity by PK or current instance.
+        Runs before_delete/after_delete hooks.
+        """
+        type(self)._ensure_ready()
+        model_name = type(self).__name__
+        pk_name = self._primary_key
+
+        try:
+            # determine instance
+            target = None
+            if pk is not None:
+                target = type(self).find(pk)
+                if not target:
+                    raise LookupError(f"{model_name} with {pk_name}={pk} not found")
+            else:
+                target = self
+
+            if not target.before_delete():
+                return False
+
+            type(self)._db.delete(target._entity)
+
+            ok = target.after_delete()
+            if ok:
+                type(self)._db.commit()
+                return True
+
+            type(self)._db.rollback()
+            return False
+
+        except Exception:
+            type(self)._db.rollback()
+            raise    
 
     def _store(self, data: dict, is_updating: bool = False, is_saving: bool = False) -> Optional["AppBaseModel"]:
         type(self)._ensure_ready()

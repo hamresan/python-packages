@@ -1,5 +1,7 @@
 import os
 import re
+import io
+from datetime import datetime
 from pathlib import Path
 from typing import Union, Optional, Any
 import pydicom
@@ -38,7 +40,7 @@ class Dicom:
 
     def __init__(
         self,
-        dicom: Union[pydicom.dataset.Dataset, _PathLike, dict],
+        dicom: Union[pydicom.dataset.Dataset, _PathLike, dict, str , bytes],
         *,
         force: bool = True,
         stop_before_pixels: bool = False,
@@ -49,6 +51,10 @@ class Dicom:
        
         if isinstance(dicom, pydicom.dataset.Dataset):
             ds = dicom
+        elif isinstance(dicom, str):
+            ds = pydicom.dcmread(dicom)   
+        elif isinstance(dicom, bytes):
+            ds = pydicom.dcmread(io.BytesIO(dicom))  
         elif isinstance(dicom, dict):
             ds = Dataset()
             private_block = None
@@ -339,7 +345,7 @@ class Dicom:
 
     @property 
     def Id(self):
-        return self.attr('SOP Instance UID')
+        return self.attr('Study Instance UID')
 
     @property 
     def PatientId(self):
@@ -367,21 +373,26 @@ class Dicom:
 
     @property 
     def TotalStudySeries(self):
-        return 1         
+        return 1  
+
+    @property 
+    def StudyDateEnsure(self):
+        date = self.attr('StudyDate')
+        return date if date and date != '' else datetime.now().strftime("%Y%m%d")       
         
     @property 
     def Year(self):    
-        date = self.attr('StudyDate')
+        date = self.StudyDateEnsure
         return date[:4]
     @property 
     
     def Month(self):    
-        date = self.attr('StudyDate')
+        date = self.StudyDateEnsure
         return date[4:6]
     
     @property 
     def Day(self):    
-        date = self.attr('StudyDate')
+        date = self.StudyDateEnsure
         return date[6:8]        
 
     def asdict(self, include_dataset: bool = True, include_wrapper: bool = True) -> dict:
