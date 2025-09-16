@@ -8,6 +8,21 @@ from typing import Any, Mapping, Optional, Type, Union, Iterable, List, Dict
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
+def safe_rollback(sess):
+    """Rollback the session safely."""
+    try:
+        sess.rollback()
+    except SQLAlchemyError as e:
+        print(f"Error during rollback: {e}")
+
+def safe_commit(sess):
+    """Commit safely; rollback if commit fails, then re-raise the error."""
+    try:
+        sess.commit()
+    except Exception:
+        safe_rollback(sess)
+        raise
+
 from .query_builder import QueryBuilder
 
 from .serializer import Serializer
@@ -89,6 +104,8 @@ class AppBaseModel(ABC):
     # optional field constraints
     _whitelist_fields: List[str] = []
     _guard_fields: List[str] = []
+
+    _is_unset_empty_fields_on_update = True
 
     def __init__(self, entity: Optional[Any] = None, attrs: Optional[dict] = None, db: Optional[Session] = None):
         super().__init__()
@@ -272,14 +289,14 @@ class AppBaseModel(ABC):
 
             ok = target.after_delete()
             if ok:
-                type(self)._db.commit()
+                safe_commit(type(self)._db)
                 return True
 
-            type(self)._db.rollback()
+            safe_rollback(type(self)._db)
             return False
 
         except Exception:
-            type(self)._db.rollback()
+            safe_rollback(type(self)._db)
             raise    
 
     def _store(self, data: dict, is_updating: bool = False, is_saving: bool = False) -> Optional["AppBaseModel"]:
@@ -300,6 +317,9 @@ class AppBaseModel(ABC):
             self = current
             old_copy = copy.copy(self)
 
+            if self._is_unset_empty_fields_on_update:
+                payload = {k: v for k, v in payload.items() if v is not None or v != ""}
+
         try:
             payload = self.before_update(payload) if is_updating else self.before_insert(payload)
             if is_saving:
@@ -313,21 +333,21 @@ class AppBaseModel(ABC):
                 ok = ok and self.after_save(old_copy)
 
             if ok:
-                type(self)._db.commit()
+                safe_commit(type(self)._db)
                 type(self)._db.refresh(self._entity)
                 return self
 
-            type(self)._db.rollback()
+            safe_rollback(type(self)._db)
             return None
 
         except IntegrityError:
-            type(self)._db.rollback()
+            safe_rollback(type(self)._db)
             return None
         except SQLAlchemyError:
-            type(self)._db.rollback()
+            safe_rollback(type(self)._db)
             return None
         except Exception:
-            type(self)._db.rollback()
+            safe_rollback(type(self)._db)
             raise
 
     # ----- attribute proxying to underlying SQLAlchemy instance -----

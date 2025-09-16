@@ -1,7 +1,7 @@
 import os
 import re
 import io
-from datetime import datetime
+from datetime import datetime, date, time, timedelta
 from pathlib import Path
 from typing import Union, Optional, Any
 import pydicom
@@ -21,6 +21,50 @@ def _normalize_id(s: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._\-]", "", s)
     return s
 
+def _parse_dicom_date(date_str: str, use_now: bool = False) -> Optional[date]:
+    """Parse DICOM date string (YYYYMMDD) to Python date."""
+    if not date_str or len(date_str) < 8:
+        return datetime.now().date() if use_now else None
+    try:
+        return datetime.strptime(date_str[:8], "%Y%m%d").date()
+    except ValueError:
+        return datetime.now().date() if use_now else None
+
+def _parse_dicom_time(time_str: str) -> Optional[time]:
+    """Parse DICOM time string (HHMMSS) to Python time."""
+    if not time_str:
+        return None
+    try:
+        # Handle various DICOM time formats
+        time_clean = time_str.split('.')[0]  # Remove fractional seconds
+        if len(time_clean) >= 6:
+            return datetime.strptime(time_clean[:6], "%H%M%S").time()
+        elif len(time_clean) >= 4:
+            return datetime.strptime(time_clean[:4], "%H%M").time()
+        elif len(time_clean) >= 2:
+            return datetime.strptime(time_clean[:2], "%H").time()
+    except ValueError:
+        pass
+    return None
+
+def _safe_int(value) -> Optional[int]:
+    """Safely convert value to int."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return None
+    
+def _safe_float(value) -> Optional[float]:
+    """Safely convert value to float."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+       
 class _SafeMap(dict):
     """Dict for str.format_map that leaves unknown placeholders as-is."""
     def __missing__(self, key):
@@ -156,22 +200,104 @@ class Dicom:
     def Patient(self):
         class PatientInfo:
             def __init__(self, ds):
-                self.Name = ds.PatientName
-                self.ID = ds.PatientID
-                self.BirthDate = ds.PatientBirthDate
-                self.Sex = ds.PatientSex
-                self.Age = ds.PatientAge
-                self.Comments = ds.PatientComments
- 
+                self.ID = getattr(ds, "PatientID", None)
+                self.Name = getattr(ds, "PatientName", None)
+                self.BirthDate = self._get_birthdate(ds)
+                self.Sex = self._get_sex(ds)
+                self.Age = getattr(ds, "PatientAge", None)
+                self.Weight = _safe_float( getattr(ds, "PatientWeight", None) )
+                self.Size = _safe_float ( getattr(ds, "PatientSize", None) )
+                self.EthnicGroup = getattr(ds, "EthnicGroup", None)
+                self.Occupation = getattr(ds, "Occupation", None)
+                self.Comments = getattr(ds, "PatientComments", None)
+
+
+            def _get_sex(self, ds) -> Optional[str]:
+                """
+                Convert DICOM PatientSex to human-readable form.
+                'M' -> 'Men'
+                'F' -> 'Women'
+                'O' or anything else -> 'Unknown'
+                """
+                
+                patient_sex = getattr(ds, "PatientSex", None)
+
+                if not patient_sex:
+                    return "Unknown" 
+
+                sex = patient_sex.strip().upper()
+                if sex == "M":
+                    return "Men"
+                elif sex == "F":
+                    return "Women"
+                elif sex == "O":
+                    return "Unknown"                
+                else:
+                    return "Unknown" 
+
+            def _get_birthdate(self, ds) -> Optional[date]:
+                """
+                Convert DICOM PatientAge (e.g., '032Y', '005M', '010D', '004W') 
+                into an approximate birth date.
+                Returns a datetime.date or None if invalid.
+                """
+
+                birth_date = _parse_dicom_date(getattr(ds, "PatientBirthDate", None))
+                age = getattr(ds, "PatientAge", None)
+
+                if birth_date:
+                    return birth_date
+
+                if not age:
+                    return None
+
+                study_date: date = _parse_dicom_date(getattr(ds, "StudyDate", None), use_now=True)
+
+                try:
+                    value = int(age[:3])   # e.g. "032" -> 32
+                    unit = age[3].upper()  # e.g. "Y"
+                except (ValueError, IndexError):
+                    return None
+
+                if unit == "Y":
+                    return date(study_date.year - value, study_date.month, study_date.day)
+                elif unit == "M":
+                    return study_date - timedelta(days=value * 30)  # approx
+                elif unit == "W":
+                    return study_date - timedelta(weeks=value)
+                elif unit == "D":
+                    return study_date - timedelta(days=value)
+
+                return None    
+
             def to_dict(self):
                 return {
-                    "Name": self.Name,
                     "ID": self.ID,
+                    "Name": self.Name,
                     "BirthDate": self.BirthDate,
                     "Sex": self.Sex,
                     "Age": self.Age,
+                    "Weight": self.Weight,
+                    "Size": self.Size,
+                    "EthnicGroup": self.EthnicGroup, 
+                    "Occupation": self.Occupation,                                                            
                     "Comments":self.Comments
-                }                
+                }  
+
+            def to_db(self):
+                return {
+                    "patient_id": self.ID,
+                    "patient_name": self.Name,
+                    "patient_birth_date": self.BirthDate,
+                    "patient_sex": self.Sex,
+                    "patient_age": self.Age,
+                    "patient_weight": self.Weight,
+                    "patient_size": self.Size,
+                    "ethnic_group": self.EthnicGroup, 
+                    "occupation": self.Occupation,                                                            
+                    "patient_comments":self.Comments
+                }                 
+                       
         return PatientInfo(self.dataset)
     
     # -------- Study --------
@@ -179,21 +305,43 @@ class Dicom:
     def Study(self):
         class StudyInfo:
             def __init__(self, ds):
-                self.InstanceUID = ds.StudyInstanceUID
-                self.StudyID = ds.StudyID
-                self.Date = ds.StudyDate
-                self.Time = ds.StudyTime
-                self.Description = ds.StudyDescription
-                self.AccessionNumber = ds.AccessionNumber
+                self.StudyInstanceUID = getattr(ds, 'StudyInstanceUID', None)
+                self.StudyID = getattr(ds, 'StudyID', None)
+                self.Date = _parse_dicom_date(getattr(ds, 'StudyDate', None))
+                self.Time = _parse_dicom_time(getattr(ds, 'StudyTime', None))
+                self.Description = getattr(ds, 'StudyDescription', None)
+                self.AccessionNumber = getattr(ds, 'AccessionNumber', None)
+                self.ReferringPhysicianName = getattr(ds, "ReferringPhysicianName", None)
+                self.AttendingPhysicianName = getattr(ds, "AttendingPhysicianName", None)
+                self.StudyPriority = getattr(ds, "StudyPriorityID", None)
+                self.StudyStatusID = getattr(ds, "StudyStatusID", None)
 
             def to_dict(self):
                 return {
-                    "InstanceUID": self.InstanceUID,
+                    "StudyInstanceUID": self.InstanceUID,
                     "StudyID": self.StudyID,
                     "Date": self.Date,
                     "Time": self.Time,
                     "Description": self.Description,
-                    "AccessionNumber": self.AccessionNumber
+                    "AccessionNumber": self.AccessionNumber,
+                    "ReferringPhysicianName": self.ReferringPhysicianName,
+                    "AttendingPhysicianName": self.AttendingPhysicianName,
+                    "StudyPriority": self.StudyPriority,
+                    "StudyStatusID": self.StudyStatusID
+                }
+            
+            def to_db(self):
+                return {
+                    "study_instance_uid": self.StudyInstanceUID,
+                    "study_id": self.StudyID,
+                    "study_date": self.Date,
+                    "study_time": self.Time,
+                    "study_description": self.Description,
+                    "accession_number": self.AccessionNumber,
+                    "referring_physician_name": self.ReferringPhysicianName,
+                    "attending_physician_name": self.AttendingPhysicianName,
+                    "study_priority": self.StudyPriority,
+                    "study_status_id": self.StudyStatusID
                 }
         return StudyInfo(self.dataset)
 
@@ -202,27 +350,176 @@ class Dicom:
     def Series(self):
         class SeriesInfo:
             def __init__(self, ds):
-                self.InstanceUID = ds.SeriesInstanceUID
-                self.SeriesNumber = ds.SeriesNumber
-                self.Description = ds.SeriesDescription
-                self.Modality = ds.Modality
-                self.BodyPartExamined = ds.BodyPartExamined
-                self.Laterality = ds.Laterality
-                self.ImageLaterality = ds.ImageLaterality
-                self.ProtocolName = ds.ProtocolName
+                self.InstanceUID = getattr(ds, "SeriesInstanceUID", None)
+                self.SeriesNumber = _safe_int( getattr(ds, "SeriesNumber", None) )
+                self.SeriesDate = _parse_dicom_date( getattr(ds, "SeriesDate", None) )
+                self.SeriesTime = _parse_dicom_time( getattr(ds, "SeriesTime", None) )
+                self.Description = getattr(ds, "SeriesDescription", None)
+                self.Modality = getattr(ds, "Modality", None)
+                self.Manufacturer = getattr(ds, "Manufacturer", None)
+                self.ManufacturerModelName = getattr(ds, "ManufacturerModelName", None)
+                self.StationName = getattr(ds, "StationName", None)
+                self.BodyPartExamined = getattr(ds, "BodyPartExamined", None)
+                self.ProtocolName = getattr(ds, "ProtocolName", None)
+                self.PerformingPhysicianName = getattr(ds, "PerformingPhysicianName", None)
+                self.OperatorsName = getattr(ds, "OperatorsName", None)
+
 
             def to_dict(self):
                 return {
                     "InstanceUID": self.InstanceUID,
                     "SeriesNumber": self.SeriesNumber,
+                    "SeriesDate": self.SeriesDate,
+                    "SeriesTime": self.SeriesTime,
                     "Description": self.Description,
                     "Modality": self.Modality,
+                    "Manufacturer": self.Manufacturer,
+                    "ManufacturerModelName": self.ManufacturerModelName,
+                    "StationName": self.StationName,
                     "BodyPartExamined": self.BodyPartExamined,
-                    "Laterality": self.Laterality,
-                    "ImageLaterality": self.ImageLaterality,
-                    "ProtocolName": self.ProtocolName
+                    "ProtocolName": self.ProtocolName,
+                    "PerformingPhysicianName": self.PerformingPhysicianName,
+                    "OperatorsName": self.OperatorsName,
                 }
+            def to_db(self):
+                return {
+                    "series_instance_uid": self.InstanceUID,
+                    "series_number": self.SeriesNumber,
+                    "series_date": self.SeriesDate,
+                    "series_time": self.SeriesTime,
+                    "description": self.Description,
+                    "modality": self.Modality,
+                    "manufacturer": self.Manufacturer,
+                    "manufacturer_model_name": self.ManufacturerModelName,
+                    "station_name": self.StationName,
+                    "body_part_examined": self.BodyPartExamined,
+                    "protocol_name": self.ProtocolName,
+                    "performing_physician_name": self.PerformingPhysicianName,
+                    "operators_name": self.OperatorsName,
+                }
+            
         return SeriesInfo(self.dataset)
+
+    # -------- Series --------
+    @property
+    def Instance(self):
+        class InstanceInfo:
+            def __init__(self, ds):
+                self.SOPInstanceUID = getattr(ds, "SOPInstanceUID", None)
+                self.SOPClassUID = getattr(ds, "SOPClassUID", None)
+                self.InstanceNumber = _safe_int( getattr(ds, "InstanceNumber", None) )
+                self.InstanceCreationDate = _parse_dicom_date( getattr(ds, "InstanceCreationDate", None) )
+                self.InstanceCreationTime = _parse_dicom_time( getattr(ds, "InstanceCreationTime", None) )
+                self.Rows = _safe_int( getattr(ds, "Rows", None) )
+                self.Columns = _safe_int( getattr(ds, "Columns", None) )
+                self.BitsAllocated = _safe_int( getattr(ds, "BitsAllocated", None) )
+                self.BitsStored = _safe_int( getattr(ds, "BitsStored", None) )
+                self.PixelSpacing = getattr(ds, "PixelSpacing", None)
+                self.SliceThickness = _safe_float( getattr(ds, "SliceThickness", None) )
+                self.SliceLocation = _safe_float( getattr(ds, "SliceLocation", None) )
+                self.ImagePositionPatient = getattr(ds, "ImagePositionPatient", None)
+                self.FileSize = _safe_int( getattr(ds, "FileSize", None) )
+                self.TransferSyntaxUID = getattr(ds, "TransferSyntaxUID", None)
+                self.ContentDate = _parse_dicom_date( getattr(ds, "ContentDate", None) )
+                self.ContentTime = _parse_dicom_time( getattr(ds, "ContentTime", None) )
+                self.AcquisitionDate = _parse_dicom_date( getattr(ds, "AcquisitionDate", None) )
+                self.AcquisitionTime = _parse_dicom_time( getattr(ds, "AcquisitionTime", None) )
+                self.KVP = _safe_float ( getattr(ds, "KVP", None) )
+                self.ExposureTime = _safe_float( getattr(ds, "ExposureTime", None) )
+                self.XRayTubeCurrent = _safe_float( getattr(ds, "XRayTubeCurrent", None) )
+
+
+            def get_positions(self):
+                # Extract image position if available
+                image_position = self.ImagePositionPatient
+                pos_x, pos_y, pos_z = None, None, None
+                if image_position:
+                    try:
+                        positions = [float(x.strip()) for x in str(image_position).split('\\')]
+                        if len(positions) >= 3:
+                            pos_x, pos_y, pos_z = positions[0], positions[1], positions[2]
+                    except (ValueError, AttributeError):
+                        pass
+
+                return pos_x, pos_y, pos_z
+            
+
+            def get_pixels(self):
+                # Extract pixel spacing
+                pixel_spacing = self.PixelSpacing
+                pixel_x, pixel_y = None, None
+                if pixel_spacing:
+                    try:
+                        spacings = [float(x.strip()) for x in str(pixel_spacing).split('\\')]
+                        if len(spacings) >= 2:
+                            pixel_x, pixel_y = spacings[0], spacings[1]
+                    except (ValueError, AttributeError):
+                        pass
+
+                return pixel_x, pixel_y
+
+            def to_dict(self):
+                return {
+                    "SOPInstanceUID":self.SOPInstanceUID,
+                    "SOPClassUID":self.SOPClassUID,
+                    "InstanceNumber":self.InstanceNumber,
+                    "InstanceCreationDate":self.InstanceCreationDate,
+                    "InstanceCreationTime":self.InstanceCreationTime,
+                    "Rows":self.Rows,
+                    "Columns":self.Columns,
+                    "BitsAllocated":self.BitsAllocated,
+                    "BitsStored":self.BitsStored,
+                    "PixelSpacing":self.PixelSpacing,
+                    "SliceThickness":self.SliceThickness,
+                    "SliceLocation":self.SliceLocation,
+                    "ImagePositionPatient":self.ImagePositionPatient,
+                    "SliceThickness":self.SliceThickness,
+                    "SliceLocation":self.SliceLocation,
+                    "ImageOrientationPatient":self.ImageOrientationPatient,
+                    "FileSize":self.FileSize,
+                    "TransferSyntaxUID":self.TransferSyntaxUID,
+                    "ContentDate":self.ContentDate,
+                    "ContentTime":self.ContentTime,
+                    "AcquisitionDate":self.AcquisitionDate,
+                    "AcquisitionTime":self.AcquisitionTime,
+                    "KVP":self.KVP,
+                    "ExposureTime":self.ExposureTime,
+                    "XRayTubeCurrent":self.XRayTubeCurrent,
+                }
+            def to_db(self):
+                pos_x, pos_y, pos_z = self.get_positions()
+                pixel_x, pixel_y = self.get_pixels()
+
+                return {
+                    "sop_instance_uid":self.SOPInstanceUID,
+                    "sop_class_uid":self.SOPClassUID,
+                    "instance_number":self.InstanceNumber,
+                    "instance_creation_date":self.InstanceCreationDate,
+                    "instance_creation_time":self.InstanceCreationTime,
+                    "rows":self.Rows,
+                    "columns":self.Columns,
+                    "bits_allocated":self.BitsAllocated,
+                    "bits_stored":self.BitsStored,
+                    "pixel_spacing_x":pixel_x,
+                    "pixel_spacing_y":pixel_y,
+                    "slice_thickness":self.SliceThickness,
+                    "slice_location":self.SliceLocation,
+                    "image_position_x":pos_x,
+                    "image_position_y":pos_y,
+                    "image_position_z":pos_z,
+                    "image_orientation":self.ImagePositionPatient,
+                    "file_size_bytes":self.FileSize,
+                    "transfer_syntax_uid":self.TransferSyntaxUID,
+                    "content_date":self.ContentDate,
+                    "content_time":self.ContentTime,
+                    "acquisition_date":self.AcquisitionDate,
+                    "acquisition_time":self.AcquisitionTime,
+                    "kvp":self.KVP,
+                    "exposure_time":self.ExposureTime,
+                    "x_ray_tube_current":self.XRayTubeCurrent,
+                }
+            
+        return InstanceInfo(self.dataset)
 
     # -------- Equipment --------
     @property
@@ -345,7 +642,7 @@ class Dicom:
 
     @property 
     def Id(self):
-        return self.attr('Study Instance UID')
+        return self.attr('SOP Instance UID')
 
     @property 
     def PatientId(self):
@@ -376,24 +673,21 @@ class Dicom:
         return 1  
 
     @property 
-    def StudyDateEnsure(self):
-        date = self.attr('StudyDate')
-        return date if date and date != '' else datetime.now().strftime("%Y%m%d")       
+    def StudyDateSafe(self)->date:
+        return _parse_dicom_date(self.attr('StudyDate'), use_now=True)
         
     @property 
-    def Year(self):    
-        date = self.StudyDateEnsure
-        return date[:4]
-    @property 
-    
-    def Month(self):    
-        date = self.StudyDateEnsure
-        return date[4:6]
+    def Year(self) -> str:    
+        return self.StudyDateSafe.strftime("%Y")
+
+    @property    
+    def Month(self) -> str:    
+        return self.StudyDateSafe.strftime("%m")
     
     @property 
-    def Day(self):    
-        date = self.StudyDateEnsure
-        return date[6:8]        
+    def Day(self) -> str:    
+        return self.StudyDateSafe.strftime("%d")
+      
 
     def asdict(self, include_dataset: bool = True, include_wrapper: bool = True) -> dict:
         """
