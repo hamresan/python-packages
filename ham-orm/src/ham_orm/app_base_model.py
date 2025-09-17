@@ -1,12 +1,19 @@
+
 from __future__ import annotations
 
 import copy
 from abc import ABC
 from functools import wraps
-from typing import Any, Mapping, Optional, Type, Union, Iterable, List, Dict
+from typing import Any, Mapping, Optional, Type, Union, Iterable, List, Dict, TypeVar
 
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
+
+_DB_CTX: ContextVar[Optional[Session]] = ContextVar("_DB_CTX", default=None)
+T = TypeVar("T")
 
 def safe_rollback(sess):
     """Rollback the session safely."""
@@ -26,6 +33,10 @@ def safe_commit(sess):
 from .query_builder import QueryBuilder
 
 from .serializer import Serializer
+
+class HookFailed(RuntimeError):
+    """Raised when a persistence hook signals failure inside a caller-managed transaction."""
+    pass
 
 class dualmethod:
     """
@@ -93,6 +104,30 @@ class AppBaseModel(ABC):
         
         # Find all users with filters
         users = UserModel.all(filters={"active": True}, limit=10)
+
+        # How to use transactions:
+
+        # Atomic block across multiple writes
+        with UserModel.transaction():
+            UserModel.insert({"name": "A"}, autocommit=False)
+            UserModel.update({"id": 5, "name": "B"}, autocommit=False)
+            # committed automatically on leaving the block
+
+        # Nested savepoint
+        with UserModel.transaction():
+            UserModel.insert({"name": "A"}, autocommit=False)
+            UserModel.update({"id": 5, "name": "B"}, autocommit=False)
+            # committed automatically on leaving the block
+
+        # Decorator to wrap method in a transaction
+        class Service:
+            @UserModel.with_transaction()
+            def create_user_and_profile(self, user_data, prof_data):
+                UserModel.insert(user_data, autocommit=False)
+                ProfileModel.insert(prof_data, autocommit=False)
+
+
+
     """
 
     _model: Type[Any] = None
@@ -123,8 +158,18 @@ class AppBaseModel(ABC):
     # ----- configuration helpers -----
     @classmethod
     def init_db(cls, db: Session):
-        cls._db = db
+        """Bind the session to the current request/task context.
+        Works for both transactional and non-transactional use."""
+        _DB_CTX.set(db)        
+        #cls._db = db
         return cls
+    
+    @classmethod
+    def _session(cls) -> Session:
+        db = _DB_CTX.get()
+        if db is None:
+            raise RuntimeError("Session not initialized. Call Model.init_db(session) first in this context.")
+        return db    
 
     @property
     def guard_fields(self) -> List[str]:
@@ -249,28 +294,25 @@ class AppBaseModel(ABC):
                 setattr(self._entity, field, sanitize(value))
 
     @dualmethod
-    def insert(self, data: Optional[dict] = None) -> Optional["AppBaseModel"]:
-        return self._store(data or {}, is_updating=False, is_saving=False)
+    def insert(self, data: Optional[dict] = None, *, autocommit: bool = True) -> Optional["AppBaseModel"]:
+        return self._store(data or {}, is_updating=False, is_saving=False, autocommit=autocommit)
 
     @dualmethod
-    def update(self, data: Optional[dict] = None) -> Optional["AppBaseModel"]:
-        return self._store(data or {}, is_updating=True, is_saving=False)
+    def update(self, data: Optional[dict] = None, *, autocommit: bool = True) -> Optional["AppBaseModel"]:
+        return self._store(data or {}, is_updating=True, is_saving=False, autocommit=autocommit)
 
     @dualmethod
-    def save(self, data: Optional[dict] = None) -> Optional["AppBaseModel"]:
+    def save(self, data: Optional[dict] = None, *, autocommit: bool = True) -> Optional["AppBaseModel"]:
         is_updating = getattr(self._entity, self._primary_key, None) is not None or (data and self._primary_key in data)
-        return self._store(data or {}, is_updating=is_updating, is_saving=True)
+        return self._store(data or {}, is_updating=is_updating, is_saving=True, autocommit=autocommit)
     
     # ----- persistence -----
     @dualmethod
-    def delete(self, pk: Any = None) -> bool:
-        """
-        Delete entity by PK or current instance.
-        Runs before_delete/after_delete hooks.
-        """
+    def delete(self, pk: Any = None, *, autocommit: bool = True) -> bool:
         type(self)._ensure_ready()
         model_name = type(self).__name__
         pk_name = self._primary_key
+        manage_tx = autocommit and not type(self).in_transaction()
 
         try:
             # determine instance
@@ -283,23 +325,54 @@ class AppBaseModel(ABC):
                 target = self
 
             if not target.before_delete():
+                if manage_tx:
+                    safe_rollback(type(self)._db)
+                else:
+                    # Let the caller decide; surface a soft failure
+                    return False
                 return False
 
             type(self)._db.delete(target._entity)
 
             ok = target.after_delete()
             if ok:
-                safe_commit(type(self)._db)
+                if manage_tx:
+                    safe_commit(type(self)._db)
+                else:
+                    type(self)._db.flush()
                 return True
 
-            safe_rollback(type(self)._db)
-            return False
+            if manage_tx:
+                safe_rollback(type(self)._db)
+                return False
+            else:
+                # Caller manages tx; signal failure so they can rollback if they want
+                raise HookFailed("after_delete() returned False")
 
         except Exception:
-            safe_rollback(type(self)._db)
-            raise    
+            if manage_tx:
+                safe_rollback(type(self)._db)
+            raise
 
-    def _store(self, data: dict, is_updating: bool = False, is_saving: bool = False) -> Optional["AppBaseModel"]:
+    @classmethod
+    def atomic(cls, fn, *, nested: bool = False):
+        """Run a callable inside a transaction and return its result."""
+        with cls.transaction(nested=nested):
+            return fn()
+
+    @staticmethod
+    def with_transaction(nested: bool = False):
+        """Decorator to wrap a method in a model-managed transaction."""
+        def deco(func):
+            @wraps(func)
+            def wrapper(self_or_cls, *args, **kwargs):
+                cls = self_or_cls if isinstance(self_or_cls, type) else type(self_or_cls)
+                with cls.transaction(nested=nested):
+                    return func(self_or_cls, *args, **kwargs)
+            return wrapper
+        return deco        
+
+    def _store(self, data: dict, is_updating: bool = False, is_saving: bool = False, *, autocommit: bool = True) -> Optional["AppBaseModel"]:
         type(self)._ensure_ready()
 
         model_name = type(self).__name__
@@ -320,6 +393,8 @@ class AppBaseModel(ABC):
             if self._is_unset_empty_fields_on_update:
                 payload = {k: v for k, v in payload.items() if v is not None or v != ""}
 
+        manage_tx = autocommit and not type(self).in_transaction()
+
         try:
             payload = self.before_update(payload) if is_updating else self.before_insert(payload)
             if is_saving:
@@ -333,22 +408,72 @@ class AppBaseModel(ABC):
                 ok = ok and self.after_save(old_copy)
 
             if ok:
-                safe_commit(type(self)._db)
-                type(self)._db.refresh(self._entity)
+                if manage_tx:
+                    safe_commit(type(self)._db)
+                    type(self)._db.refresh(self._entity)
+                else:
+                    type(self)._db.flush()
+                    # refresh optional; leave to caller for perf
                 return self
 
-            safe_rollback(type(self)._db)
-            return None
+            if manage_tx:
+                safe_rollback(type(self)._db)
+                return None
+            else:
+                # Caller manages tx — surface a failure so they can decide
+                raise HookFailed("after_* hook returned False, not committing")
 
         except IntegrityError:
-            safe_rollback(type(self)._db)
-            return None
+            if manage_tx:
+                safe_rollback(type(self)._db)
+                return None
+            else:
+                raise
         except SQLAlchemyError:
-            safe_rollback(type(self)._db)
-            return None
+            if manage_tx:
+                safe_rollback(type(self)._db)
+                return None
+            else:
+                raise
         except Exception:
-            safe_rollback(type(self)._db)
+            if manage_tx:
+                safe_rollback(type(self)._db)
             raise
+
+    # ----- transaction helpers -----
+    @classmethod
+    @contextmanager
+    def transaction(cls, nested: bool = False):
+        """
+        Usage:
+            with UserModel.transaction():
+                UserModel.insert({...}, autocommit=False)
+                UserModel.update({...}, autocommit=False)
+            # auto-committed/rolled back by context
+        """
+        cls._ensure_ready()
+        if nested:
+            with cls._db.begin_nested():
+                yield cls._db
+        else:
+            with cls._db.begin():
+                yield cls._db
+
+    @classmethod
+    def in_transaction(cls) -> bool:
+        """True if the Session currently has an active (nested) transaction."""
+        cls._ensure_ready()
+        db = cls._session()
+        try:
+            return bool(cls._db.in_transaction() or cls._db.in_nested_transaction())
+        except AttributeError:
+            return bool(getattr(cls._db, "is_active", False))
+
+    @classmethod
+    def _autotx_ctx(cls):
+        """Open a transaction only if we're not already in one."""
+        db = cls._session()
+        return nullcontext() if cls.in_transaction() else db.begin()
 
     # ----- attribute proxying to underlying SQLAlchemy instance -----
     def __getattr__(self, name):
