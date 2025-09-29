@@ -1,5 +1,7 @@
 from .query_builder import QueryBuilder
-from .app_base_model import AppBaseModel, dualmethod
-from .serializer import Serializer
+from .model import AppBaseModel
+from .descriptors import dualmethod
+from .utils import attach_base
 
-__all__ = ["QueryBuilder", "AppBaseModel", "dualmethod", "Serializer"]
+def attach_base(child_cls):
+    __all__ = ["QueryBuilder", "AppBaseModel", "dualmethod", "attach_base", "set_session", "get_engine_seeion", "get_db", "init_engine", "init_db", "close_db", "Base"]
