@@ -4,7 +4,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Type, U
 import re
 from sqlalchemy import and_, or_
 
-from attr import field
+#from attr import field
 
 from sqlalchemy.orm import Session, load_only, selectinload, joinedload
 from sqlalchemy.orm.attributes import InstrumentedAttribute

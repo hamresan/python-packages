@@ -469,10 +469,10 @@ class AppBaseModel:
         if name.startswith("find_by_"):
             field = name[len("find_by_"):]  # e.g. "uid" from "find_by_uid"
 
-            def finder(value):
+            def finder(value, fields: Iterable[Union[str, Any]] = (), include: Iterable[Union[str, Any]] = ()):
                 # Here you implement your logic, like querying the DB
                 # Example return (replace with ORM query)
-                return self.find_by(field, value)
+                return self.find_by(field, value, fields=fields, include=include)
 
             return finder
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
